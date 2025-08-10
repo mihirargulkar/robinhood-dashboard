@@ -117,7 +117,7 @@ with st.sidebar:
         initial_balance = st.number_input(
             "Initial Account Balance",
             min_value=0.0,
-            value=5500.0,  # Changed default from 10000.0 to 5500.0
+            value=5500.0,
             step=100.0,
             format="%.2f"
         )
@@ -207,11 +207,62 @@ if not df.empty:
     risk_free_rate = 0.0
     sharpe_annualization_factor = np.sqrt(252)
     sharpe_ratio = 0.0
-    if 'pnl' in filtered_df.columns and 'collateral' in filtered_df.columns:
-        returns = filtered_df['pnl'] / filtered_df['collateral']
-        if len(returns) > 1 and returns.std() != 0:
-            sharpe_ratio = (returns.mean() - risk_free_rate) / returns.std() * sharpe_annualization_factor
     
+    # --- Alpha, Beta and Volatility Calculation ---
+    alpha = None
+    beta = None
+    portfolio_volatility = None
+    
+    if (
+        'pnl' in filtered_df.columns
+        and 'order_created_at' in filtered_df.columns
+        and not spy_df.empty
+        and initial_balance > 0
+    ):
+        # Create daily returns for the portfolio
+        portfolio_df = filtered_df[['order_created_at', 'pnl']].copy()
+        portfolio_df['portfolio_value'] = initial_balance + portfolio_df['pnl'].cumsum()
+        portfolio_df = portfolio_df.rename(columns={'order_created_at': 'date'})
+        
+        portfolio_daily = portfolio_df.set_index('date')['portfolio_value'].resample('D').ffill().pct_change().dropna()
+        
+        # Create daily returns for the benchmark
+        benchmark_daily = spy_df.set_index('date')['price'].resample('D').ffill().pct_change().dropna()
+        
+        # Align the dataframes by date
+        combined_returns = pd.concat([portfolio_daily, benchmark_daily], axis=1).dropna()
+        combined_returns.columns = ['portfolio_returns', 'benchmark_returns']
+        
+        if len(combined_returns) > 1:
+            # Calculate Beta (Covariance / Variance of Benchmark)
+            covariance = combined_returns['portfolio_returns'].cov(combined_returns['benchmark_returns'])
+            benchmark_variance = combined_returns['benchmark_returns'].var()
+            
+            if benchmark_variance != 0:
+                beta = covariance / benchmark_variance
+            else:
+                beta = 0.0
+            
+            # Calculate Alpha (Jensen's Alpha from CAPM)
+            # Alpha = Portfolio Return - [Risk-Free Rate + Beta * (Market Return - Risk-Free Rate)]
+            avg_portfolio_return = combined_returns['portfolio_returns'].mean()
+            avg_benchmark_return = combined_returns['benchmark_returns'].mean()
+            
+            alpha = (avg_portfolio_return - (risk_free_rate + beta * (avg_benchmark_return - risk_free_rate)))
+            
+            # Annualize Alpha
+            alpha_annualized = alpha * 252 * 100 # Multiply by 252 trading days and 100 for percentage
+            alpha = alpha_annualized
+
+            # Calculate Portfolio Volatility (Annualized standard deviation of daily returns)
+            portfolio_volatility = combined_returns['portfolio_returns'].std() * np.sqrt(252)
+
+            # Recalculate Sharpe Ratio with the new volatility
+            if portfolio_volatility != 0:
+                sharpe_ratio = (avg_portfolio_return - risk_free_rate) / combined_returns['portfolio_returns'].std() * sharpe_annualization_factor
+            else:
+                sharpe_ratio = 0.0
+
     if 'pnl' in filtered_df.columns:
         cumulative_pnl = initial_balance + filtered_df['pnl'].cumsum()
         if not cumulative_pnl.empty:
@@ -224,6 +275,7 @@ if not df.empty:
         max_drawdown = 0.0
 
     calmar_ratio = total_pnl / max_drawdown if max_drawdown > 0 else (np.inf if total_pnl > 0 else -np.inf)
+
 
     # --- Displaying Statistics ---
     st.header("Portfolio Statistics")
@@ -246,7 +298,7 @@ if not df.empty:
         with col1:
             st.metric(label="Avg ROI", value=f"{avg_roi:.2f}%")
         with col2:
-            st.metric(label="Total ROI", value=f"{total_roi:.2f}%")  # Added Total ROI
+            st.metric(label="Total ROI", value=f"{total_roi:.2f}%")
         with col3:
             st.metric(label="Max PnL", value=f"${max_pnl:,.2f}")
         with col4:
@@ -255,13 +307,25 @@ if not df.empty:
             st.metric(label="Avg Holding Period", value=f"{avg_holding_period:.0f} days")
 
     with stats_tab3:
-        col1, col2, col3, col4, col5 = st.columns(5)
+        col1, col2, col3, col4, col5, col6, col7 = st.columns(7)
         with col1:
             st.metric(label="Sharpe Ratio", value=f"{sharpe_ratio:.2f}")
         with col2:
-            st.metric(label="Max Drawdown", value=f"${max_drawdown:,.2f}")
+            st.metric(label="Portfolio Volatility", value=f"{portfolio_volatility:.2%}" if portfolio_volatility is not None else "N/A")
         with col3:
+            st.metric(label="Max Drawdown", value=f"${max_drawdown:,.2f}")
+        with col4:
             st.metric(label="Calmar Ratio", value=f"{calmar_ratio:.2f}")
+        with col5:
+            if alpha is not None and not np.isnan(alpha):
+                st.metric(label="Alpha (vs. SPY)", value=f"{alpha:.2f}%")
+            else:
+                st.metric(label="Alpha (vs. SPY)", value="N/A")
+        with col6:
+            if beta is not None and not np.isnan(beta):
+                st.metric(label="Beta (vs. SPY)", value=f"{beta:.2f}")
+            else:
+                st.metric(label="Beta (vs. SPY)", value="N/A")
         
         with st.expander("What are these metrics?"):
             st.markdown("""
@@ -273,18 +337,26 @@ if not df.empty:
             * $R_p$ = Average return of the portfolio
             * $R_f$ = Risk-free rate of return (assumed to be 0 here)
             * $\\sigma_p$ = Standard deviation of the portfolio's returns
-            
+
+            **Portfolio Volatility**: The annualized standard deviation of daily returns of the portfolio. It measures the degree of variation of returns over time. Higher volatility means more risk.
+
             **Max Drawdown**: The maximum observed loss from a peak to a trough of a portfolio, before a new peak is attained. It is a key measure of downside risk.
             
             **Calmar Ratio**: A risk-adjusted return metric that uses maximum drawdown in the denominator instead of standard deviation. It's often preferred by traders to understand return relative to worst-case losses. A higher number is better.
             
             $Calmar Ratio = \\frac{Total Return}{Maximum Drawdown}$
 
-            **Alpha & Beta**:
-            * **Alpha**: A measure of a portfolio's performance compared to a relevant benchmark index (e.g., S&P 500). A positive alpha means you're outperforming the benchmark.
-            * **Beta**: A measure of a portfolio's volatility in relation to the overall market. A beta of 1 means your portfolio moves with the market, while a beta > 1 means it's more volatile.
+            **Alpha (vs. SPY)**: A measure of a portfolio's performance relative to the S&P 500 (SPY) benchmark, adjusted for risk. A positive alpha means you're outperforming the benchmark. It is calculated using the Capital Asset Pricing Model (CAPM).
+
+            $Alpha = R_p - [R_f + \\beta * (R_m - R_f)]$
+
+            Where:
+            * $R_p$ = Average daily return of the portfolio
+            * $R_f$ = Risk-free rate of return (assumed to be 0)
+            * $\\beta$ = Beta of the portfolio
+            * $R_m$ = Average daily return of the market (SPY)
             
-            To calculate Alpha and Beta, you would need to provide a separate dataset with benchmark prices and uncomment the relevant calculation code.
+            **Beta (vs. SPY)**: A measure of a portfolio's volatility in relation to the S&P 500 (SPY) benchmark. A beta of 1 means your portfolio moves with the market, while a beta > 1 means it is more volatile and a beta < 1 means it is less volatile.
             """)
     st.markdown("---")
 
