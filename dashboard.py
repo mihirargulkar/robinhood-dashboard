@@ -36,6 +36,11 @@ def load_data():
     # Clean and convert data types for proper analysis and visualization.
     if 'expiration_date' in df.columns:
         df['expiration_date'] = pd.to_datetime(df['expiration_date'], errors='coerce')
+    
+    # Correctly convert 'order_created_at' to a UTC timezone-aware datetime object
+    if 'order_created_at' in df.columns:
+        df['order_created_at'] = pd.to_datetime(df['order_created_at'], errors='coerce', utc=True)
+
     if 'strike_price' in df.columns:
         df['strike_price'] = pd.to_numeric(df['strike_price'], errors='coerce')
         df.dropna(subset=['strike_price'], inplace=True)
@@ -44,9 +49,10 @@ def load_data():
     if 'expiration_date' in df.columns:
         df['entry_date'] = df['expiration_date'] - pd.to_timedelta(np.random.randint(5, 30, size=len(df)), unit='D')
     
-    # Sort by date for time series analysis.
-    if 'expiration_date' in df.columns:
-        df.sort_values('expiration_date', inplace=True)
+    # Sort by 'order_created_at' for time series analysis
+    if 'order_created_at' in df.columns:
+        df.sort_values('order_created_at', inplace=True)
+
     return df
 
 @st.cache_data
@@ -60,9 +66,9 @@ def load_spy_data():
         if os.path.exists(path):
             try:
                 spy_df = pd.read_csv(path)
-                # Corrected column name check and rename
                 if 'Date' in spy_df.columns and 'SPY' in spy_df.columns:
-                    spy_df['Date'] = pd.to_datetime(spy_df['Date'])
+                    # Also localize the benchmark data to UTC for consistent comparison
+                    spy_df['Date'] = pd.to_datetime(spy_df['Date']).dt.tz_localize('UTC')
                     spy_df.rename(columns={'Date': 'date', 'SPY': 'price'}, inplace=True)
                     spy_df.sort_values('date', inplace=True)
                 else:
@@ -135,22 +141,26 @@ with st.sidebar:
             options=all_symbols,
             default='All'
         )
-
-        if not df.empty and 'expiration_date' in df.columns and not df['expiration_date'].isnull().all():
-            min_date = df['expiration_date'].min().date()
-            max_date = df['expiration_date'].max().date()
-            date_range = st.date_input(
-                "Select Expiration Date Range",
-                value=(min_date, max_date),
-                min_value=min_date,
-                max_value=max_date
+        
+        # New date filter using 'order_created_at'
+        if not df.empty and 'order_created_at' in df.columns and not df['order_created_at'].isnull().all():
+            min_date_trade = df['order_created_at'].min().date()
+            max_date_trade = df['order_created_at'].max().date()
+            trade_date_range = st.date_input(
+                "Select Trade Creation Date Range",
+                value=(min_date_trade, max_date_trade),
+                min_value=min_date_trade,
+                max_value=max_date_trade
             )
-            if isinstance(date_range, tuple) and len(date_range) == 2:
-                start_date, end_date = date_range
-            elif isinstance(date_range, list) and len(date_range) == 2:
-                start_date, end_date = date_range
+            if isinstance(trade_date_range, tuple) and len(trade_date_range) == 2:
+                # Localize the dates to UTC to match the DataFrame
+                start_date = pd.to_datetime(trade_date_range[0]).tz_localize('UTC')
+                end_date = pd.to_datetime(trade_date_range[1]).tz_localize('UTC') + timedelta(days=1) - timedelta(microseconds=1)
+            elif isinstance(trade_date_range, list) and len(trade_date_range) == 2:
+                start_date = pd.to_datetime(trade_date_range[0]).tz_localize('UTC')
+                end_date = pd.to_datetime(trade_date_range[1]).tz_localize('UTC') + timedelta(days=1) - timedelta(microseconds=1)
             else:
-                start_date = end_date = min_date
+                start_date = end_date = pd.to_datetime(min_date_trade).tz_localize('UTC')
         else:
             start_date = end_date = None
 
@@ -166,10 +176,11 @@ if not df.empty:
         filtered_df = filtered_df[filtered_df['opening_strategy'].isin(selected_strategies)]
     if 'All' not in selected_symbols and 'symbol' in filtered_df.columns:
         filtered_df = filtered_df[filtered_df['symbol'].isin(selected_symbols)]
-    if start_date is not None and end_date is not None and 'expiration_date' in filtered_df.columns:
+    
+    if start_date is not None and end_date is not None and 'order_created_at' in filtered_df.columns:
         filtered_df = filtered_df[
-            (filtered_df['expiration_date'].dt.date >= start_date) &
-            (filtered_df['expiration_date'].dt.date <= end_date)
+            (filtered_df['order_created_at'] >= start_date) &
+            (filtered_df['order_created_at'] <= end_date)
         ]
 
     # --- Portfolio Statistics Calculations ---
@@ -277,24 +288,28 @@ if not df.empty:
         with chart_tab1:
             st.subheader("Cumulative PnL vs. S&P 500 Benchmark")
             chart_df = filtered_df.copy()
-            if 'pnl' in chart_df.columns and not spy_df.empty:
-                # Prepare portfolio data
-                portfolio_daily_pnl = filtered_df.set_index('expiration_date')['pnl'].resample('D').sum().fillna(0)
-                portfolio_cumulative_pnl = (initial_balance + portfolio_daily_pnl.cumsum()).reset_index()
-                portfolio_cumulative_pnl.columns = ['date', 'value']
+            if 'pnl' in chart_df.columns and 'order_created_at' in chart_df.columns and not spy_df.empty:
+                # Prepare portfolio data using 'order_created_at'
+                chart_df = chart_df.sort_values('order_created_at')
+                portfolio_cumulative_pnl = chart_df[['order_created_at', 'pnl']].copy()
+                portfolio_cumulative_pnl['value'] = initial_balance + portfolio_cumulative_pnl['pnl'].cumsum()
+                portfolio_cumulative_pnl = portfolio_cumulative_pnl.rename(columns={'order_created_at': 'date'})
                 portfolio_cumulative_pnl['Type'] = 'Portfolio'
-                
+
                 # Prepare S&P 500 data
                 benchmark_df = spy_df.copy()
                 
+                # Align S&P 500 start date to first order_created_at
                 start_date_of_trades = portfolio_cumulative_pnl['date'].min()
                 if not benchmark_df[benchmark_df['date'] >= start_date_of_trades].empty:
                     sp500_start_value = benchmark_df[benchmark_df['date'] >= start_date_of_trades]['price'].iloc[0]
                     benchmark_df = benchmark_df[benchmark_df['date'] >= start_date_of_trades].copy()
-                    
                     benchmark_df['cumulative_return'] = (benchmark_df['price'] / sp500_start_value)
                     benchmark_df['value'] = initial_balance * (benchmark_df['cumulative_return'])
                     benchmark_df['Type'] = 'S&P 500'
+                    # For a fair comparison, only keep S&P 500 data up to the last trade
+                    end_date_of_trades = portfolio_cumulative_pnl['date'].max()
+                    benchmark_df = benchmark_df[benchmark_df['date'] <= end_date_of_trades]
                     
                     combined_df = pd.concat([portfolio_cumulative_pnl, benchmark_df[['date', 'value', 'Type']]])
                     
@@ -311,9 +326,8 @@ if not df.empty:
                     st.plotly_chart(fig_line, use_container_width=True)
                 else:
                     st.info("No S&P 500 data available for the selected date range.")
-
             else:
-                st.info("PnL data or S&P 500 data not available for cumulative chart.")
+                st.info("PnL data, order_created_at, or S&P 500 data not available for cumulative chart.")
         
         with chart_tab2:
             st.subheader("PnL Distribution")
