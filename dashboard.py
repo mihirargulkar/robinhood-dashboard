@@ -47,28 +47,38 @@ def load_data():
         df.sort_values('order_created_at', inplace=True)
     return df
 
+# --- Benchmark Data Loading ---
 @st.cache_data
-def load_spy_data():
+def load_benchmark_data(benchmark_file, price_col):
     """
-    Loads and preprocesses S&P 500 benchmark data from spy_data.csv.
+    Loads and preprocesses benchmark data from a given CSV file.
     """
-    for path in ['spy_data.csv', os.path.join('data', 'spy_data.csv')]:
+    for path in [benchmark_file, os.path.join('data', benchmark_file)]:
         if os.path.exists(path):
             try:
-                spy_df = pd.read_csv(path)
-                if {'Date', 'SPY'}.issubset(spy_df.columns):
-                    spy_df['Date'] = pd.to_datetime(spy_df['Date']).dt.tz_localize('UTC')
-                    spy_df.rename(columns={'Date': 'date', 'SPY': 'price'}, inplace=True)
-                    spy_df.sort_values('date', inplace=True)
-                    return spy_df
+                bench_df = pd.read_csv(path)
+                if 'Date' in bench_df.columns and price_col in bench_df.columns:
+                    bench_df['Date'] = pd.to_datetime(bench_df['Date']).dt.tz_localize('UTC')
+                    bench_df.rename(columns={'Date': 'date', price_col: 'price'}, inplace=True)
+                    bench_df.sort_values('date', inplace=True)
+                    return bench_df
                 else:
-                    st.error("Error: The 'spy_data.csv' file must contain 'Date' and 'SPY' columns.")
+                    st.error(f"Error: The '{benchmark_file}' file must contain 'Date' and '{price_col}' columns.")
                     return pd.DataFrame()
             except Exception as e:
                 st.error(f"Error reading '{path}': {e}")
                 return pd.DataFrame()
-    st.error("Error: The file 'spy_data.csv' was not found. Please ensure it is in the app directory or in a 'data/' subdirectory.")
+    st.error(f"Error: The file '{benchmark_file}' was not found. Please ensure it is in the app directory or in a 'data/' subdirectory.")
     return pd.DataFrame()
+
+# --- Benchmark Options ---
+BENCHMARKS = [
+    {"label": "S&P 500 (SPY)", "file": "spy_data.csv", "price_col": "SPY", "display": "S&P 500"},
+    {"label": "NASDAQ 100 (QQQ)", "file": "qqq_data.csv", "price_col": "QQQ", "display": "NASDAQ 100"},
+    {"label": "Russell 2000 (IWM)", "file": "iwm_data.csv", "price_col": "IWM", "display": "Russell 2000"},
+    {"label": "Dow Jones (DIA)", "file": "dia_data.csv", "price_col": "DIA", "display": "Dow Jones"},
+    # Add more benchmarks here as needed
+]
 
 # --- Main App Logic ---
 
@@ -86,7 +96,6 @@ plotly_theme = "plotly_dark"
 
 # Load the data
 df = load_data()
-spy_df = load_spy_data()
 
 # Sidebar for filters
 with st.sidebar:
@@ -122,6 +131,23 @@ with st.sidebar:
                 start_date = end_date = pd.to_datetime(min_date_trade).tz_localize('UTC')
         else:
             start_date = end_date = None
+
+    # --- Benchmark Selection ---
+    st.header("Benchmark Settings")
+    benchmark_labels = [b["label"] for b in BENCHMARKS]
+    default_benchmark_idx = 0
+    selected_benchmark_label = st.selectbox(
+        "Select Benchmark for Comparison",
+        options=benchmark_labels,
+        index=default_benchmark_idx
+    )
+    selected_benchmark = next(b for b in BENCHMARKS if b["label"] == selected_benchmark_label)
+    benchmark_file = selected_benchmark["file"]
+    benchmark_price_col = selected_benchmark["price_col"]
+    benchmark_display_name = selected_benchmark["display"]
+
+# Load selected benchmark data
+benchmark_df = load_benchmark_data(benchmark_file, benchmark_price_col)
 
 # Main title and introduction
 st.title("Mills Investment Dashboard")
@@ -165,14 +191,14 @@ if not df.empty:
     if (
         pnl_col in filtered_df.columns
         and 'order_created_at' in filtered_df.columns
-        and not spy_df.empty
+        and not benchmark_df.empty
         and initial_balance > 0
     ):
         portfolio_df = filtered_df[['order_created_at', pnl_col]].copy()
         portfolio_df['portfolio_value'] = initial_balance + portfolio_df[pnl_col].cumsum()
         portfolio_df = portfolio_df.rename(columns={'order_created_at': 'date'})
         portfolio_daily = portfolio_df.set_index('date')['portfolio_value'].resample('D').ffill().pct_change().dropna()
-        benchmark_daily = spy_df.set_index('date')['price'].resample('D').ffill().pct_change().dropna()
+        benchmark_daily = benchmark_df.set_index('date')['price'].resample('D').ffill().pct_change().dropna()
         combined_returns = pd.concat([portfolio_daily, benchmark_daily], axis=1).dropna()
         combined_returns.columns = ['portfolio_returns', 'benchmark_returns']
         if len(combined_returns) > 1:
@@ -232,18 +258,18 @@ if not df.empty:
             ("Portfolio Volatility", f"{portfolio_volatility:.2%}" if portfolio_volatility is not None else "N/A"),
             ("Max Drawdown", f"${max_drawdown:,.2f}"),
             ("Calmar Ratio", f"{calmar_ratio:.2f}"),
-            ("Alpha (vs. SPY)", f"{alpha:.2f}%" if alpha is not None and not np.isnan(alpha) else "N/A"),
-            ("Beta (vs. SPY)", f"{beta:.2f}" if beta is not None and not np.isnan(beta) else "N/A"),
+            (f"Alpha (vs. {benchmark_display_name})", f"{alpha:.2f}%" if alpha is not None and not np.isnan(alpha) else "N/A"),
+            (f"Beta (vs. {benchmark_display_name})", f"{beta:.2f}" if beta is not None and not np.isnan(beta) else "N/A"),
         ]
         for col, (label, value) in zip(cols, metrics3):
             col.metric(label=label, value=value)
         # The 7th column is left for spacing or future use
 
         with st.expander("What are these metrics?"):
-            st.markdown("""
+            st.markdown(f"""
             **Sharpe Ratio**: A measure of risk-adjusted return. It indicates how much excess return you receive for the extra volatility you endure for holding a riskier asset. A higher number is better.
             
-            $Sharpe Ratio = \\frac{R_p - R_f}{\\sigma_p}$
+            $Sharpe Ratio = \\frac{{R_p - R_f}}{{\\sigma_p}}$
             
             Where:
             * $R_p$ = Average return of the portfolio
@@ -256,9 +282,9 @@ if not df.empty:
             
             **Calmar Ratio**: A risk-adjusted return metric that uses maximum drawdown in the denominator instead of standard deviation. It's often preferred by traders to understand return relative to worst-case losses. A higher number is better.
             
-            $Calmar Ratio = \\frac{Total Return}{Maximum Drawdown}$
+            $Calmar Ratio = \\frac{{Total Return}}{{Maximum Drawdown}}$
 
-            **Alpha (vs. SPY)**: A measure of a portfolio's performance relative to the S&P 500 (SPY) benchmark, adjusted for risk. A positive alpha means you're outperforming the benchmark. It is calculated using the Capital Asset Pricing Model (CAPM).
+            **Alpha (vs. {benchmark_display_name})**: A measure of a portfolio's performance relative to the selected benchmark, adjusted for risk. A positive alpha means you're outperforming the benchmark. It is calculated using the Capital Asset Pricing Model (CAPM).
 
             $Alpha = R_p - [R_f + \\beta * (R_m - R_f)]$
 
@@ -266,10 +292,11 @@ if not df.empty:
             * $R_p$ = Average daily return of the portfolio
             * $R_f$ = Risk-free rate of return (assumed to be 0)
             * $\\beta$ = Beta of the portfolio
-            * $R_m$ = Average daily return of the market (SPY)
+            * $R_m$ = Average daily return of the market ({benchmark_display_name})
             
-            **Beta (vs. SPY)**: A measure of a portfolio's volatility in relation to the S&P 500 (SPY) benchmark. A beta of 1 means your portfolio moves with the market, while a beta > 1 means it is more volatile and a beta < 1 means it is less volatile.
+            **Beta (vs. {benchmark_display_name})**: A measure of a portfolio's volatility in relation to the selected benchmark. A beta of 1 means your portfolio moves with the market, while a beta > 1 means it is more volatile and a beta < 1 means it is less volatile.
             """)
+
     st.markdown("---")
 
     # --- Interactive Charts ---
@@ -278,43 +305,43 @@ if not df.empty:
         chart_tabs = st.tabs([
             "Cumulative PnL", "PnL Distribution", "PnL by Strategy", "ROI Distribution", "Collateral by Strategy"
         ])
-        # Cumulative PnL vs. S&P 500
+        # Cumulative PnL vs. Benchmark
         with chart_tabs[0]:
-            st.subheader("Cumulative PnL vs. S&P 500 Benchmark")
+            st.subheader(f"Cumulative PnL vs. {benchmark_display_name} Benchmark")
             chart_df = filtered_df.copy()
-            if pnl_col in chart_df.columns and 'order_created_at' in chart_df.columns and not spy_df.empty:
+            if pnl_col in chart_df.columns and 'order_created_at' in chart_df.columns and not benchmark_df.empty:
                 chart_df = chart_df.sort_values('order_created_at')
                 portfolio_cumulative_pnl = chart_df[['order_created_at', pnl_col]].copy()
                 portfolio_cumulative_pnl['value'] = initial_balance + portfolio_cumulative_pnl[pnl_col].cumsum()
                 portfolio_cumulative_pnl = portfolio_cumulative_pnl.rename(columns={'order_created_at': 'date'})
                 portfolio_cumulative_pnl['Type'] = 'Portfolio'
-                benchmark_df = spy_df.copy()
+                bench_df = benchmark_df.copy()
                 start_date_of_trades = portfolio_cumulative_pnl['date'].min()
-                bench_mask = benchmark_df['date'] >= start_date_of_trades
+                bench_mask = bench_df['date'] >= start_date_of_trades
                 if bench_mask.any():
-                    sp500_start_value = benchmark_df.loc[bench_mask, 'price'].iloc[0]
-                    benchmark_df = benchmark_df.loc[bench_mask].copy()
-                    benchmark_df['cumulative_return'] = (benchmark_df['price'] / sp500_start_value)
-                    benchmark_df['value'] = initial_balance * benchmark_df['cumulative_return']
-                    benchmark_df['Type'] = 'S&P 500'
+                    bench_start_value = bench_df.loc[bench_mask, 'price'].iloc[0]
+                    bench_df = bench_df.loc[bench_mask].copy()
+                    bench_df['cumulative_return'] = (bench_df['price'] / bench_start_value)
+                    bench_df['value'] = initial_balance * bench_df['cumulative_return']
+                    bench_df['Type'] = benchmark_display_name
                     end_date_of_trades = portfolio_cumulative_pnl['date'].max()
-                    benchmark_df = benchmark_df[benchmark_df['date'] <= end_date_of_trades]
-                    combined_df = pd.concat([portfolio_cumulative_pnl, benchmark_df[['date', 'value', 'Type']]])
+                    bench_df = bench_df[bench_df['date'] <= end_date_of_trades]
+                    combined_df = pd.concat([portfolio_cumulative_pnl, bench_df[['date', 'value', 'Type']]])
                     fig_line = px.line(
                         combined_df,
                         x='date',
                         y='value',
                         color='Type',
-                        title='Cumulative Performance: Portfolio vs. S&P 500',
+                        title=f'Cumulative Performance: Portfolio vs. {benchmark_display_name}',
                         labels={'date': 'Date', 'value': 'Account Value ($)'},
                         template=plotly_theme
                     )
                     fig_line.update_layout(hovermode="x unified")
                     st.plotly_chart(fig_line, use_container_width=True)
                 else:
-                    st.info("No S&P 500 data available for the selected date range.")
+                    st.info(f"No {benchmark_display_name} data available for the selected date range.")
             else:
-                st.info("PnL data, order_created_at, or S&P 500 data not available for cumulative chart.")
+                st.info(f"PnL data, order_created_at, or {benchmark_display_name} data not available for cumulative chart.")
 
         # PnL Distribution
         with chart_tabs[1]:
