@@ -117,7 +117,7 @@ with st.sidebar:
         initial_balance = st.number_input(
             "Initial Account Balance",
             min_value=0.0,
-            value=10000.0,
+            value=5500.0,  # Changed default from 10000.0 to 5500.0
             step=100.0,
             format="%.2f"
         )
@@ -196,6 +196,12 @@ if not df.empty:
     else:
         avg_roi = 0.0
 
+    # --- Total ROI calculation (relative to initial balance) ---
+    if initial_balance > 0:
+        total_roi = (total_pnl / initial_balance) * 100
+    else:
+        total_roi = 0.0
+
     avg_holding_period = (filtered_df['expiration_date'] - filtered_df['entry_date']).mean().days if 'expiration_date' in filtered_df.columns and 'entry_date' in filtered_df.columns else 0
 
     risk_free_rate = 0.0
@@ -236,14 +242,16 @@ if not df.empty:
             st.metric(label="Avg PnL per Trade", value=f"${avg_pnl_per_trade:,.2f}")
 
     with stats_tab2:
-        col1, col2, col3, col4 = st.columns(4)
+        col1, col2, col3, col4, col5 = st.columns(5)
         with col1:
             st.metric(label="Avg ROI", value=f"{avg_roi:.2f}%")
         with col2:
-            st.metric(label="Max PnL", value=f"${max_pnl:,.2f}")
+            st.metric(label="Total ROI", value=f"{total_roi:.2f}%")  # Added Total ROI
         with col3:
-            st.metric(label="Min PnL", value=f"${min_pnl:,.2f}")
+            st.metric(label="Max PnL", value=f"${max_pnl:,.2f}")
         with col4:
+            st.metric(label="Min PnL", value=f"${min_pnl:,.2f}")
+        with col5:
             st.metric(label="Avg Holding Period", value=f"{avg_holding_period:.0f} days")
 
     with stats_tab3:
