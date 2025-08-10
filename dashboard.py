@@ -2,7 +2,6 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import plotly.express as px
-import plotly.graph_objects as go
 import os
 from datetime import timedelta
 
@@ -50,6 +49,34 @@ def load_data():
         df.sort_values('expiration_date', inplace=True)
     return df
 
+@st.cache_data
+def load_spy_data():
+    """
+    Loads and preprocesses S&P 500 benchmark data from spy_data.csv.
+    """
+    possible_paths = ['spy_data.csv', os.path.join('data', 'spy_data.csv')]
+    spy_df = None
+    for path in possible_paths:
+        if os.path.exists(path):
+            try:
+                spy_df = pd.read_csv(path)
+                # Corrected column name check and rename
+                if 'Date' in spy_df.columns and 'SPY' in spy_df.columns:
+                    spy_df['Date'] = pd.to_datetime(spy_df['Date'])
+                    spy_df.rename(columns={'Date': 'date', 'SPY': 'price'}, inplace=True)
+                    spy_df.sort_values('date', inplace=True)
+                else:
+                    st.error("Error: The 'spy_data.csv' file must contain 'Date' and 'SPY' columns.")
+                    return pd.DataFrame()
+                break
+            except Exception as e:
+                st.error(f"Error reading '{path}': {e}")
+                return pd.DataFrame()
+    if spy_df is None:
+        st.error("Error: The file 'spy_data.csv' was not found. Please ensure it is in the app directory or in a 'data/' subdirectory.")
+        return pd.DataFrame()
+    return spy_df
+
 # --- Main App Logic ---
 
 # Set a consistent dark theme for the app
@@ -71,6 +98,7 @@ plotly_theme = "plotly_dark"
 
 # Load the data
 df = load_data()
+spy_df = load_spy_data()
 
 # Sidebar for filters
 with st.sidebar:
@@ -80,7 +108,14 @@ with st.sidebar:
         if st.button("Reset Filters"):
             st.rerun()
         
-        # Fix: Only use df if it is not empty, else use empty lists
+        initial_balance = st.number_input(
+            "Initial Account Balance",
+            min_value=0.0,
+            value=10000.0,
+            step=100.0,
+            format="%.2f"
+        )
+        
         if not df.empty and 'opening_strategy' in df.columns:
             all_strategies = ['All'] + list(df['opening_strategy'].unique())
         else:
@@ -118,7 +153,6 @@ with st.sidebar:
                 start_date = end_date = min_date
         else:
             start_date = end_date = None
-        # Removed Sharpe Ratio Period selection
 
 # Main title and introduction
 st.title("Mills Investment Dashboard")
@@ -146,8 +180,6 @@ if not df.empty:
     max_pnl = filtered_df['pnl'].max() if num_trades > 0 and 'pnl' in filtered_df.columns else 0
     min_pnl = filtered_df['pnl'].min() if num_trades > 0 and 'pnl' in filtered_df.columns else 0
 
-    # --- FIXED AVG ROI CALCULATION ---
-    # Calculate average ROI as total PnL divided by total collateral, expressed as a percentage
     if 'pnl' in filtered_df.columns and 'collateral' in filtered_df.columns and filtered_df['collateral'].sum() != 0:
         avg_roi = (filtered_df['pnl'].sum() / filtered_df['collateral'].sum()) * 100
     else:
@@ -155,18 +187,16 @@ if not df.empty:
 
     avg_holding_period = (filtered_df['expiration_date'] - filtered_df['entry_date']).mean().days if 'expiration_date' in filtered_df.columns and 'entry_date' in filtered_df.columns else 0
 
-    # Calculate Sharpe Ratio (default to annualized using daily returns)
     risk_free_rate = 0.0
-    sharpe_annualization_factor = np.sqrt(252)  # Default to daily
+    sharpe_annualization_factor = np.sqrt(252)
     sharpe_ratio = 0.0
     if 'pnl' in filtered_df.columns and 'collateral' in filtered_df.columns:
         returns = filtered_df['pnl'] / filtered_df['collateral']
         if len(returns) > 1 and returns.std() != 0:
             sharpe_ratio = (returns.mean() - risk_free_rate) / returns.std() * sharpe_annualization_factor
     
-    # Calculate Max Drawdown
     if 'pnl' in filtered_df.columns:
-        cumulative_pnl = filtered_df['pnl'].cumsum()
+        cumulative_pnl = initial_balance + filtered_df['pnl'].cumsum()
         if not cumulative_pnl.empty:
             running_max = cumulative_pnl.expanding(min_periods=1).max()
             drawdown = running_max - cumulative_pnl
@@ -176,7 +206,6 @@ if not df.empty:
     else:
         max_drawdown = 0.0
 
-    # Calculate Calmar Ratio
     calmar_ratio = total_pnl / max_drawdown if max_drawdown > 0 else (np.inf if total_pnl > 0 else -np.inf)
 
     # --- Displaying Statistics ---
@@ -243,26 +272,48 @@ if not df.empty:
     # --- Interactive Charts ---
     st.header("Interactive Charts")
     if not filtered_df.empty:
-        chart_tab1, chart_tab2, chart_tab3, chart_tab4, chart_tab5, chart_tab6 = st.tabs(["Cumulative PnL", "PnL Distribution", "PnL by Strategy", "ROI Distribution", "Collateral by Strategy", "PnL Calendar Heatmap"])
+        chart_tab1, chart_tab2, chart_tab3, chart_tab4, chart_tab5 = st.tabs(["Cumulative PnL", "PnL Distribution", "PnL by Strategy", "ROI Distribution", "Collateral by Strategy"])
         
         with chart_tab1:
-            st.subheader("Cumulative PnL Over Time")
+            st.subheader("Cumulative PnL vs. S&P 500 Benchmark")
             chart_df = filtered_df.copy()
-            if 'pnl' in chart_df.columns:
-                chart_df['cumulative_pnl'] = chart_df['pnl'].cumsum()
-                fig_line = px.line(
-                    chart_df,
-                    x='expiration_date' if 'expiration_date' in chart_df.columns else chart_df.index,
-                    y='cumulative_pnl',
-                    title='Cumulative Profit and Loss',
-                    labels={'expiration_date': 'Expiration Date', 'cumulative_pnl': 'Cumulative PnL ($)'},
-                    hover_data={'pnl': ':.2f', 'symbol': True, 'opening_strategy': True, 'expiration_date': '|%Y-%m-%d'} if 'expiration_date' in chart_df.columns else None,
-                    template=plotly_theme
-                )
-                fig_line.update_layout(hovermode="x unified")
-                st.plotly_chart(fig_line, use_container_width=True)
+            if 'pnl' in chart_df.columns and not spy_df.empty:
+                # Prepare portfolio data
+                portfolio_daily_pnl = filtered_df.set_index('expiration_date')['pnl'].resample('D').sum().fillna(0)
+                portfolio_cumulative_pnl = (initial_balance + portfolio_daily_pnl.cumsum()).reset_index()
+                portfolio_cumulative_pnl.columns = ['date', 'value']
+                portfolio_cumulative_pnl['Type'] = 'Portfolio'
+                
+                # Prepare S&P 500 data
+                benchmark_df = spy_df.copy()
+                
+                start_date_of_trades = portfolio_cumulative_pnl['date'].min()
+                if not benchmark_df[benchmark_df['date'] >= start_date_of_trades].empty:
+                    sp500_start_value = benchmark_df[benchmark_df['date'] >= start_date_of_trades]['price'].iloc[0]
+                    benchmark_df = benchmark_df[benchmark_df['date'] >= start_date_of_trades].copy()
+                    
+                    benchmark_df['cumulative_return'] = (benchmark_df['price'] / sp500_start_value)
+                    benchmark_df['value'] = initial_balance * (benchmark_df['cumulative_return'])
+                    benchmark_df['Type'] = 'S&P 500'
+                    
+                    combined_df = pd.concat([portfolio_cumulative_pnl, benchmark_df[['date', 'value', 'Type']]])
+                    
+                    fig_line = px.line(
+                        combined_df,
+                        x='date',
+                        y='value',
+                        color='Type',
+                        title='Cumulative Performance: Portfolio vs. S&P 500',
+                        labels={'date': 'Date', 'value': 'Account Value ($)'},
+                        template=plotly_theme
+                    )
+                    fig_line.update_layout(hovermode="x unified")
+                    st.plotly_chart(fig_line, use_container_width=True)
+                else:
+                    st.info("No S&P 500 data available for the selected date range.")
+
             else:
-                st.info("PnL data not available for cumulative chart.")
+                st.info("PnL data or S&P 500 data not available for cumulative chart.")
         
         with chart_tab2:
             st.subheader("PnL Distribution")
@@ -325,41 +376,6 @@ if not df.empty:
                 st.plotly_chart(fig_pie, use_container_width=True)
             else:
                 st.info("Strategy or collateral data not available for pie chart.")
-
-        with chart_tab6:
-            st.subheader("PnL Calendar Heatmap")
-            if 'pnl' in filtered_df.columns and 'expiration_date' in filtered_df.columns:
-                daily_pnl = filtered_df.groupby(filtered_df['expiration_date'].dt.date)['pnl'].sum().reset_index()
-                daily_pnl['expiration_date'] = pd.to_datetime(daily_pnl['expiration_date'])
-                
-                daily_pnl['day_of_week'] = daily_pnl['expiration_date'].dt.day_name()
-                daily_pnl['week_of_year'] = daily_pnl['expiration_date'].dt.isocalendar().week
-                
-                current_year = st.selectbox("Select Year", options=sorted(daily_pnl['expiration_date'].dt.year.unique()), index=0)
-                heatmap_data = daily_pnl[daily_pnl['expiration_date'].dt.year == current_year]
-                
-                if not heatmap_data.empty:
-                    fig_heatmap = go.Figure(data=go.Heatmap(
-                        z=heatmap_data['pnl'],
-                        x=heatmap_data['day_of_week'],
-                        y=heatmap_data['week_of_year'],
-                        colorscale='RdYlGn',
-                        hovertemplate='Date: %{text}<br>PnL: %{z:$.2f}<extra></extra>',
-                        text=heatmap_data['expiration_date']
-                    ))
-                    fig_heatmap.update_layout(
-                        title=f'Daily PnL for {current_year}',
-                        xaxis_nticks=7,
-                        xaxis_title="",
-                        yaxis_title="Week of Year",
-                        template=plotly_theme,
-                        height=500
-                    )
-                    st.plotly_chart(fig_heatmap, use_container_width=True)
-                else:
-                    st.info(f"No data available for the selected year ({current_year}).")
-            else:
-                st.info("PnL or expiration date data not available for heatmap.")
 
     st.markdown("---")
 
