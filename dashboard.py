@@ -18,20 +18,7 @@ st.set_page_config(
 # --- Data Loading and Preprocessing ---
 @st.cache_data
 def load_data():
-    """
-    Loads and preprocesses the CSV data from the default file.
-    """
-    for path in ['combined_trades.csv', os.path.join('data', 'combined_trades.csv')]:
-        if os.path.exists(path):
-            try:
-                df = pd.read_csv(path)
-                break
-            except Exception as e:
-                st.error(f"Error reading '{path}': {e}")
-                return pd.DataFrame()
-    else:
-        st.error("Error: The file 'combined_trades.csv' was not found. Please ensure it is in the app directory or in a 'data/' subdirectory.")
-        return pd.DataFrame()
+    df = pd.read_csv('data/combined_trades.csv')
 
     # Data type conversions
     if 'expiration_date' in df.columns:
